@@ -96,5 +96,5 @@ if __name__ == "__main__":
     
     agent = KrakenFuturesAgent(KEY, SECRET)
     
-    # Example: Trade Ethereum with a 0.2% Profit Target and 0.1% Stop Loss
-    agent.start_trading(symbol="PI_ETHUSD", size=50, tp=0.2, sl=-0.1)
+    # Example: Trade Bitcoin with a 0.2% Profit Target and 0.1% Stop Loss
+    agent.start_trading(symbol="PI_XBTUSD", size=50, tp=0.2, sl=-0.1)
