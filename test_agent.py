@@ -3,10 +3,10 @@ AI Trading Agent — Kraken Futures Demo
 =======================================
 Python port of the browser-based JS trading agent.
 Uses Kraken's public REST API for market data and demo futures API for paper trading.
-Google Gemini acts as the decision-maker.
+Groq (llama-3.3-70b-versatile) acts as the decision-maker.
 
 Requirements:
-    pip install requests python-dotenv google-genai
+    pip install requests python-dotenv groq
 
 Usage:
     python trading_agent.py
@@ -23,25 +23,24 @@ from datetime import datetime
 
 import requests
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+from groq import Groq
 
 # ─── CONFIG & ENVIRONMENT ──────────────────────────────────────────────────────
 load_dotenv()
 
 API_KEY    = os.getenv("KRAKEN_DEMO_KEY")
 API_SECRET = os.getenv("KRAKEN_DEMO_SECRET")
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_KEY   = os.getenv("GROQ_API_KEY")
 
-if not all([API_KEY, API_SECRET, GEMINI_KEY]):
+if not all([API_KEY, API_SECRET, GROQ_KEY]):
     raise ValueError("Missing environment variables. Please check your .env file.")
 
-gemini_client = genai.Client(api_key=GEMINI_KEY)
+groq_client = Groq(api_key=GROQ_KEY)
 
 SYMBOL      = "PI_XBTUSD"
 TRADE_SIZE  = 50
-TAKE_PROFIT = 0.5
-STOP_LOSS   = -0.2
+TAKE_PROFIT = 0.1
+STOP_LOSS   = -0.1
 CYCLE_SEC   = 300
 MONITOR_SEC = 10
 
@@ -59,10 +58,6 @@ log = logging.getLogger("agent")
 # ─── RETRY HELPER ──────────────────────────────────────────────────────────────
 
 def with_retry(fn, retries=3, delay=5):
-    """
-    Call fn(). On ReadTimeout or ConnectionError, wait `delay` seconds and retry.
-    Raises RuntimeError if all retries are exhausted.
-    """
     for attempt in range(1, retries + 1):
         try:
             return fn()
@@ -70,20 +65,11 @@ def with_retry(fn, retries=3, delay=5):
             if attempt == retries:
                 raise RuntimeError(f"All {retries} retries failed: {e}") from e
             log.warning(f"Network error (attempt {attempt}/{retries}): {e} — retrying in {delay}s...")
-            time.sleep(delay * attempt)  # exponential-ish backoff: 5s, 10s, 15s
+            time.sleep(delay * attempt)
 
 # ─── KRAKEN AUTHENTICATION ─────────────────────────────────────────────────────
 
 def kraken_sign(endpoint_path: str, nonce: str, post_data: str) -> str:
-    """
-    Build the Authent header required by Kraken Futures API.
-
-    Kraken's signing algorithm:
-      1. Concatenate:  postData + nonce + endpointPath
-      2. SHA-256 hash that string
-      3. HMAC-SHA-512 the hash using the base64-decoded API secret
-      4. Base64-encode the result
-    """
     message   = post_data + nonce + endpoint_path
     sha256    = hashlib.sha256(message.encode()).digest()
     secret    = base64.b64decode(API_SECRET)
@@ -91,7 +77,6 @@ def kraken_sign(endpoint_path: str, nonce: str, post_data: str) -> str:
     return base64.b64encode(signature).decode()
 
 def auth_headers(endpoint_path: str, nonce: str, post_data: str) -> dict:
-    """Return the headers needed for authenticated Kraken Futures requests."""
     return {
         "APIKey":       API_KEY,
         "Authent":      kraken_sign(endpoint_path, nonce, post_data),
@@ -102,17 +87,11 @@ def auth_headers(endpoint_path: str, nonce: str, post_data: str) -> dict:
 # ─── MARKET DATA ───────────────────────────────────────────────────────────────
 
 def fetch_ticker(pair: str = "XBTUSD") -> dict:
-    """
-    Fetch live ticker from Kraken spot API.
-    Returns price, 24h volume, high, low, vwap.
-    Timeout raised to 30s. Wrapped with retry in signal_cycle.
-    """
     r = requests.get(f"{KRAKEN_PUBLIC}/Ticker", params={"pair": pair}, timeout=30)
     r.raise_for_status()
     data = r.json()
     if data.get("error"):
         raise RuntimeError(data["error"])
-
     ticker = list(data["result"].values())[0]
     return {
         "price":  float(ticker["c"][0]),
@@ -124,12 +103,6 @@ def fetch_ticker(pair: str = "XBTUSD") -> dict:
 
 
 def fetch_ohlc(pair: str = "XBTUSD", interval: int = 60) -> list:
-    """
-    Fetch OHLC candles from Kraken spot API.
-    interval = candle size in minutes (60 = 1-hour candles).
-    Returns a list of candles: [time, open, high, low, close, vwap, volume, count]
-    Timeout raised to 30s. Wrapped with retry in signal_cycle.
-    """
     r = requests.get(
         f"{KRAKEN_PUBLIC}/OHLC",
         params={"pair": pair, "interval": interval},
@@ -139,23 +112,17 @@ def fetch_ohlc(pair: str = "XBTUSD", interval: int = 60) -> list:
     data = r.json()
     if data.get("error"):
         raise RuntimeError(data["error"])
-
     candles = [v for v in data["result"].values() if isinstance(v, list)][0]
     return candles
 
 
 def calc_sma(closes: list, n: int) -> float | None:
-    """Simple moving average of the last n closing prices."""
     if len(closes) < n:
         return None
     return sum(closes[-n:]) / n
 
 
 def calc_momentum(closes: list, n: int = 4) -> str:
-    """
-    Look at the last n candles and count up-moves vs down-moves.
-    Returns 'up', 'down', or 'flat'.
-    """
     if len(closes) < n + 1:
         return "unknown"
     recent = closes[-n:]
@@ -167,11 +134,8 @@ def calc_momentum(closes: list, n: int = 4) -> str:
 
 
 def build_signals(ticker: dict, ohlc: list) -> dict:
-    """
-    Combine ticker + OHLC data into a signals dict for Gemini to evaluate.
-    """
-    closes  = [float(c[4]) for c in ohlc]   # index 4 = close price
-    volumes = [float(c[6]) for c in ohlc]   # index 6 = volume
+    closes  = [float(c[4]) for c in ohlc]
+    volumes = [float(c[6]) for c in ohlc]
 
     sma_6h  = calc_sma(closes, 6)
     sma_24h = calc_sma(closes, min(24, len(closes)))
@@ -195,14 +159,14 @@ def build_signals(ticker: dict, ohlc: list) -> dict:
         "low_24h":           ticker["low24"],
     }
 
-# ─── GEMINI DECISION ───────────────────────────────────────────────────────────
+# ─── GROQ DECISION ─────────────────────────────────────────────────────────────
 
-def ask_gemini(signals: dict) -> dict:
+def ask_groq(signals: dict) -> dict:
     """
-    Send the market signals to Gemini and get a trading decision back.
-    Returns: {"action": "buy"|"sell"|"hold", "amount_percent": 0-5, "reasoning": "..."}
+    Send market signals to Groq (llama-3.3-70b-versatile) and get a trading decision.
+    Uses JSON mode for structured output. Includes exponential backoff for rate limits.
     """
-    prompt = f"""You are a conservative crypto futures trading agent on Kraken demo.
+    prompt = f"""You are a crypto futures trading agent on Kraken demo.
 
 Current market signals for PI_XBTUSD:
 {json.dumps(signals, indent=2)}
@@ -212,27 +176,39 @@ Rules:
 - Never exceed 5% portfolio per trade
 - When uncertain: HOLD
 
-Respond adhering to this JSON schema:
-{{"action": "buy" | "sell" | "hold", "amount_percent": integer between 0 and 5, "reasoning": "one short sentence"}}
-"""
+Respond with ONLY a valid JSON object matching this schema exactly:
+{{"action": "buy" | "sell" | "hold", "amount_percent": <integer 0-5>, "reasoning": "<one short sentence>"}}"""
 
-    response = gemini_client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-        )
-    )
+    max_retries = 5
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                temperature=0.1,
+                max_tokens=128,
+            )
+            return json.loads(response.choices[0].message.content)
 
-    return json.loads(response.text)
+        except Exception as e:
+            error_msg = str(e).lower()
+
+            if "429" in error_msg or "rate limit" in error_msg or "quota" in error_msg:
+                if attempt < max_retries:
+                    sleep_time = 10 * (2 ** (attempt - 1))  # 10s, 20s, 40s, 80s
+                    log.warning(f"Groq rate limited (429). Retrying in {sleep_time}s... (Attempt {attempt}/{max_retries})")
+                    time.sleep(sleep_time)
+                    continue
+
+            log.error(f"Groq API Error: {e}")
+            return {"action": "hold", "amount_percent": 0, "reasoning": "API error fallback"}
+
+    return {"action": "hold", "amount_percent": 0, "reasoning": "Max retries exceeded due to rate limits"}
 
 # ─── ORDER EXECUTION ───────────────────────────────────────────────────────────
 
 def place_order(side: str, size: int, symbol: str) -> dict:
-    """
-    Place a market order on Kraken Futures DEMO.
-    Timeout raised to 30s.
-    """
     path      = "/api/v3/sendorder"
     http_path = f"{KRAKEN_DEMO}/api/v3/sendorder"
     nonce     = str(int(time.time() * 1000))
@@ -247,11 +223,6 @@ def place_order(side: str, size: int, symbol: str) -> dict:
 
 
 def get_demo_price(symbol: str) -> float | None:
-    """
-    FIX: Now fetches live price from Kraken SPOT API (same source as signal cycle).
-    The old demo futures /api/v3/tickers endpoint was returning a stale/frozen
-    value for 'last', causing PnL to always show +0.00%.
-    """
     try:
         ticker = fetch_ticker("XBTUSD")
         return ticker["price"]
@@ -260,7 +231,6 @@ def get_demo_price(symbol: str) -> float | None:
 
 
 def close_position(position: dict, reason: str) -> None:
-    """Close an open position by placing a sell order for the same size."""
     log.warning(f"Closing position: {reason}")
     try:
         res = place_order("sell", position["size"], position["symbol"])
@@ -274,10 +244,6 @@ def close_position(position: dict, reason: str) -> None:
 # ─── MAIN AGENT LOOP ───────────────────────────────────────────────────────────
 
 def monitor_position(position: dict) -> dict | None:
-    """
-    Check PnL of open position and close it if TP or SL is hit.
-    Returns None if position was closed, or the unchanged position dict.
-    """
     try:
         curr = with_retry(lambda: get_demo_price(position["symbol"]))
         if curr is None:
@@ -303,14 +269,6 @@ def monitor_position(position: dict) -> dict | None:
 
 
 def signal_cycle(position: dict | None) -> dict | None:
-    """
-    One full cycle:
-      1. Fetch market data  (with retry)
-      2. Build signals
-      3. Ask Gemini for a decision
-      4. Execute trade or hold
-    Returns the current open position (or None if none).
-    """
     log.info("─── Signal cycle starting ───")
     try:
         log.info("Fetching ticker...")
@@ -324,9 +282,9 @@ def signal_cycle(position: dict | None) -> dict | None:
                  f"vs_sma_6h={signals['price_vs_sma_6h']}  vs_sma_24h={signals['price_vs_sma_24h']}  "
                  f"spike={signals['volume_spike']}")
 
-        log.info("Asking Gemini...")
-        decision = ask_gemini(signals)
-        log.info(f"Gemini decision → {decision['action'].upper()} {decision['amount_percent']}% | {decision['reasoning']}")
+        log.info("Asking Groq...")
+        decision = ask_groq(signals)
+        log.info(f"Groq decision → {decision['action'].upper()} {decision['amount_percent']}% | {decision['reasoning']}")
 
         action = decision["action"]
 
@@ -344,7 +302,7 @@ def signal_cycle(position: dict | None) -> dict | None:
                 log.error(f"Order failed: {res.get('sendStatus')}")
 
         elif action == "sell" and position is not None:
-            log.info("Gemini says SELL → closing position...")
+            log.info("Groq says SELL → closing position...")
             close_position(position, f"AI decision: {decision['reasoning']}")
             position = None
 
@@ -358,12 +316,6 @@ def signal_cycle(position: dict | None) -> dict | None:
 
 
 def run():
-    """
-    Main loop.
-    - Runs a signal cycle immediately on start
-    - Then every CYCLE_SEC seconds runs another cycle
-    - Every MONITOR_SEC seconds checks PnL if a position is open
-    """
     log.info("=" * 50)
     log.info("  AI Trading Agent — Kraken Futures Demo")
     log.info("=" * 50)
