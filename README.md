@@ -1,130 +1,194 @@
-# AI Trading Agent 🤖📈
-
-> Autonomous AI-powered trading agent built with Kraken CLI — submitted for the [AI Trading Agents Hackathon](https://lablab.ai/ai-hackathons/ai-trading-agents) on lablab.ai.
-
-**Team:** Harolds of Hackathon &nbsp;|&nbsp; **Challenge:** Kraken CLI &nbsp;|&nbsp; **Event:** March 30 – April 12, 2026
-
----
-
-## What It Does
-
-This project is an autonomous trading agent that connects to the Kraken exchange, analyses live market data, and executes trades programmatically — with no human intervention required.
-
-The agent follows a continuous loop:
-
-1. **Perceive** — fetches real-time OHLCV price data from Kraken via the CLI
-2. **Analyse** — computes technical indicators (RSI, EMA) to identify market signals
-3. **Reason** — passes signals to an LLM, which decides whether to buy, sell, or hold
-4. **Execute** — applies risk controls, then places orders through the Kraken CLI
-
----
-
-## Project Structure
+# ⚡ HAROLD
+### *The AI Trading Agent That Never Sleeps*
 
 ```
-ai-trading-agent/
-│
-├── agent/
-│   ├── data.py          # Kraken CLI integration and market data fetching
-│   ├── indicators.py    # RSI, EMA, and signal computation
-│   ├── reasoning.py     # LLM prompt and decision parsing
-│   └── execution.py     # Risk controls and order execution
-│
-├── config/
-│   └── settings.py      # Thresholds, timeframes, and shared config
-│
-├── tests/
-│   └── test_agent.py    # Unit tests
-│
-├── docs/
-│   └── architecture.md  # System design and technical decisions
-│
-├── .env.example         # Required environment variables (template)
-├── requirements.txt     # Python dependencies
-└── README.md
+██╗  ██╗ █████╗ ██████╗  ██████╗ ██╗     ██████╗
+██║  ██║██╔══██╗██╔══██╗██╔═══██╗██║     ██╔══██╗
+███████║███████║██████╔╝██║   ██║██║     ██║  ██║
+██╔══██║██╔══██║██╔══██╗██║   ██║██║     ██║  ██║
+██║  ██║██║  ██║██║  ██║╚██████╔╝███████╗██████╔╝
+╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═════╝
+```
+
+> *"Markets are a device for transferring money from the impatient to the patient."*
+> Harold doesn't have patience. Harold has algorithms.
+
+---
+
+## 🧠 What Is Harold?
+
+Harold is a **fully autonomous AI crypto trading agent** built for the [lablab.ai Hackathon](https://lablab.ai). He wakes up every 5 minutes, reads the market, consults an LLM brain powered by **Groq + LLaMA 3.3 70B**, and decides whether to buy, sell, or wait — all without a single human touching the keyboard.
+
+He also has an **on-chain identity** via **ERC-8004**, signs his trade intents with **EIP-712**, and routes executions through a **whitelisted Risk Router contract**. Harold isn't just a bot. Harold is a *verifiable agent*.
+
+---
+
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                       HAROLD CORE                        │
+│                                                         │
+│  ┌──────────────┐    ┌──────────────┐    ┌───────────┐  │
+│  │  Kraken CLI  │───▶│ Signal Engine│───▶│ Groq LLM  │  │
+│  │  Market Data │    │ SMA + Range  │    │ LLaMA 3.3 │  │
+│  └──────────────┘    └──────────────┘    └─────┬─────┘  │
+│                                                │        │
+│  ┌─────────────────────────────────────────────▼──────┐  │
+│  │                  Decision Router                    │  │
+│  │         BUY  ──▶  Paper Trade via Kraken CLI       │  │
+│  │         SELL ──▶  Exit + CSV log                   │  │
+│  │         HOLD ──▶  Sleep & Monitor PnL              │  │
+│  └────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────┐
+│                   HAROLD ON-CHAIN (ERC-8004)             │
+│                                                         │
+│  Agent Identity Registry  →  Reputation Registry        │
+│  EIP-712 Trade Signatures →  EIP-1271 Wallet Support    │
+│  Risk Router Contract     →  DEX Execution (Sepolia)    │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Getting Started
+## 🔥 Features
 
-### Prerequisites
+### 🤖 AI Brain — Groq + LLaMA 3.3 70B
+- Sub-second inference via Groq's ultra-fast API
+- JSON-mode output for deterministic, parseable decisions
+- Position-aware prompting — Harold knows his own PnL before deciding to hold or cut
+- Temperature `0.1` — consistent, logical, not hallucinating moon calls
 
-- Python 3.10+
-- [Kraken CLI](https://github.com/kraken-hq/kraken-cli) installed
-- A Kraken account (paper trading sandbox works for testing)
-- An LLM API key (OpenAI / Anthropic / etc.)
+### 📊 Signal Pipeline
+| Signal | Source | What It Tells Harold |
+|---|---|---|
+| `price` | Kraken CLI | Current BTC price |
+| `sma_6h` | OHLC (6 candles × 60min) | Short-term trend |
+| `sma_24h` | OHLC (24 candles × 60min) | Medium-term baseline |
+| `momentum` | Last 5 candles (up/down count) | Recent price direction |
+| `range_position` | (price - low24) / (high24 - low24) | Is BTC near top or bottom of today's range? |
+| `volume_spike` | Last vol vs 20-candle avg | Unusual buying/selling pressure |
 
-### Installation
+### 🛡️ Risk Management
+- **Take Profit**: `+1.0%` — lock gains fast
+- **Stop Loss**: `-1.0%` — cut losses, no ego
+- **Position monitor**: checks every 15 seconds
+- **Entry gate**: requires SMA alignment + momentum before buying
+- **Overbought guard**: won't buy if `range_position > 85%`
+- **CSV trade log**: every action timestamped and auditable
 
+### 🔗 On-Chain Identity (ERC-8004 Track)
+- **Agent Identity Registry** — Harold has a verifiable on-chain identity deployed on Sepolia testnet
+- **Reputation Registry** — trade history and performance attestations stored on-chain
+- **EIP-712 Typed Signatures** — every trade intent is cryptographically signed before execution
+- **EIP-1271** — smart contract wallet support for agent authentication
+- **EIP-155** — chain-ID binding prevents replay attacks across networks
+- **Risk Router Contract** — all DEX executions go through a whitelisted Uniswap-style router; Harold cannot go rogue
+
+---
+
+## 🚀 Quick Start
+
+### 1. Clone
 ```bash
-# 1. Clone the repository
-git clone https://github.com/your-username/ai-trading-agent.git
-cd ai-trading-agent
-
-# 2. Install Python dependencies
-pip install -r requirements.txt
-
-# 3. Set up environment variables
-cp .env.example .env
-# Fill in your keys inside .env
-
-# 4. Run the agent in paper trading mode
-python agent/main.py --mode paper
+git clone https://github.com/hammad-tayyab/Trading-agent-harold-of-hackathon
+cd Trading-agent-harold-of-hackathon
 ```
 
-### Environment Variables
+### 2. Set up environment
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install groq python-dotenv requests
+```
 
-Copy `.env.example` to `.env` and fill in your values:
+### 3. Configure `.env`
+```env
+GROQ_API_KEY=your_groq_key_here
+```
+> Get a free Groq key at [console.groq.com](https://console.groq.com)
+
+### 4. Install Kraken CLI
+```bash
+# Follow official Kraken CLI setup
+# Ensure `kraken` is in your PATH and paper trading is enabled
+```
+
+### 5. Run Harold
+```bash
+python trading_agent.py
+```
+
+Harold will log every decision, every signal, every trade. Watch him work.
+
+---
+
+## 📁 Repo Structure
 
 ```
-KRAKEN_API_KEY=
-KRAKEN_API_SECRET=
-LLM_API_KEY=
-TRADING_PAIR=XBTUSD
-TIMEFRAME=1h
-MAX_POSITION_SIZE=0.05
-DAILY_LOSS_LIMIT=0.10
+├── trading_agent.py     # Harold's main brain — Groq + Kraken CLI
+├── kraken_demo.py       # v3 — legacy demo futures integration
+├── test_agent.py        # Early prototype
+├── harold_state.json    # Persistent state across restarts
+├── trades_log.csv       # Full trade audit log
+├── .gitignore
+├── LICENSE
+└── README.md            # You are here
 ```
 
 ---
 
-## Risk Controls
+## 📈 Sample Output
 
-The agent enforces hard limits on every trade before execution:
-
-- **Position sizing** — never risks more than 5% of portfolio per trade
-- **Stop-loss** — automatically exits a position if it drops beyond the threshold
-- **Daily loss limit** — halts all trading if total losses exceed 10% in a single day
-- **Paper trading mode** — test safely with zero real money before going live
+```
+00:50:09  INFO     ━━━ HAROLD AI STARTING (COMPETITION MODE) ━━━
+00:50:17  INFO     Groq → BUY 4% | Bullish SMA crossover with upward momentum
+00:50:17  INFO     🚀 Bought @ $83,241.00
+00:55:22  INFO     Monitor: PnL +0.73% | BTC $83,849.00
+01:00:31  INFO     Monitor: PnL +1.02% | BTC $84,091.00
+01:00:31  INFO     ✅ Take profit hit. Profit locked.
+```
 
 ---
 
-## Tech Stack
+## 👥 Team
 
-| Layer | Technology |
+Built at **lablab.ai Hackathon** by a team of 8.
+
+| Role | Owner |
 |---|---|
-| Exchange connectivity | Kraken CLI |
-| Market data | Kraken REST API (via CLI) |
-| AI reasoning | LLM (TBD) |
-| Language | Python 3.10+ |
-| Indicators | pandas-ta / manual implementation |
+| Agent Architecture & AI Pipeline | [@hammad-tayyab](https://github.com/hammad-tayyab) |
+| On-Chain Identity (ERC-8004) | Team |
+| EIP-712 / Risk Router Integration | Team |
+| Smart Contract Deployment (Sepolia) | Team |
 
 ---
 
-## Team
+## 🏆 Tracks Entered
 
-| Name | Role |
-|---|---|
-| TBD | Project Lead |
-| TBD | Data Pipeline & Kraken CLI |
-| TBD | Indicators & Strategy |
-| TBD | AI Reasoning Layer |
-| TBD | Risk Controls & Execution |
-| TBD | Presentation & Social |
+- ✅ **Kraken Track** — Paper trading agent with live market data and AI decisions
+- ✅ **ERC-8004 Track** — On-chain agent identity, reputation, and verified trade execution
 
 ---
 
-## License
+## ⚠️ Disclaimer
 
-This project is licensed under the [MIT License](LICENSE).
+Harold trades with **paper money only** (Kraken demo / paper mode). This is a hackathon project — not financial advice. Do not give Harold your real money. Harold is confident, not infallible.
+
+---
+
+## 📄 License
+
+MIT — see [LICENSE](LICENSE)
+
+---
+
+<div align="center">
+
+**Built in sleepless nights. Powered by Groq. Trusted by no one's real money.**
+
+*Harold is always watching the charts.*
+
+</div>
