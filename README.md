@@ -128,11 +128,11 @@ Every trade Harold executes passes through a **whitelisted Risk Router contract*
 
 | Signal | Source | What It Tells Harold |
 |---|---|---|
-| `price` | Kraken CLI | Current BTC spot price |
+| `price` | Kraken CLI | Current ETH spot price |
 | `sma_6h` | OHLC (6 × 60min) | Short-term trend direction |
 | `sma_24h` | OHLC (24 × 60min) | Medium-term baseline |
 | `momentum` | Last 5 candles | Recent price direction |
-| `range_position` | (price − low24) / (high24 − low24) | Where BTC sits in today's range |
+| `range_position` | (price − low24) / (high24 − low24) | Where ETH sits in today's range |
 | `volume_spike` | Last vol vs 20-candle avg | Unusual buying/selling pressure |
 | `news_sentiment` | Prism API | Macro and crypto news tone score |
 
@@ -292,8 +292,8 @@ Paste the `sepolia_tx_hash` into [sepolia.etherscan.io](https://sepolia.ethersca
 00:50:17  INFO  EIP-712 intent signed: 0xabcd...ef01
 00:50:18  INFO  ERC-8004 check: PASS (rep score 94/100)
 00:50:18  INFO  🚀 Bought @ $83,241.00 | Tx: 0x1234...5678
-00:55:22  INFO  Monitor: PnL +0.73% | BTC $83,849.00
-01:00:31  INFO  Monitor: PnL +1.02% | BTC $84,091.00
+00:55:22  INFO  Monitor: PnL +0.73% | ETH $3,421.00
+01:00:31  INFO  Monitor: PnL +1.02% | ETH $3,438.00
 01:00:31  INFO  ✅ Take profit hit. Profit locked. Reputation updated.
 ```
 
