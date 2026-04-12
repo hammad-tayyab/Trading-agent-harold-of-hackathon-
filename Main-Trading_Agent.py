@@ -276,12 +276,13 @@ def record_outcome(pnl_usd: float, amount_usd: float, notes: str):
             log.error(f"⚠️ Reputation Tx Failed (Non-fatal) attempt {tries + 1}: {e}")
 
 # ─── SAFETY WRAPPERS ───────────────────────────────────────────────────────────
-def safe_post_checkpoint(action, pair, amount_usd, reasoning, score, trade_approved, tx_hash):
+def safe_post_checkpoint(action, pair, amount_usd,price_usd, reasoning, score, trade_approved, tx_hash):
     try:
         post_checkpoint(
             action=action,
             pair=pair,
             amount_usd=amount_usd,
+            price_usd=price_usd,
             reasoning=reasoning,
             score=score,
             approved=trade_approved,
@@ -734,6 +735,7 @@ def run():
                                 safe_post_checkpoint(
                                     action="BUY", pair="ETH/USD",
                                     amount_usd=trade_value_usd,
+                                    price_usd=price,
                                     reasoning=decision.get("reasoning", ""),
                                     score=80, trade_approved=True, tx_hash=tx_hash,
                                 )
@@ -743,6 +745,7 @@ def run():
                             safe_post_checkpoint(
                                 action="BUY", pair="ETH/USD",
                                 amount_usd=trade_value_usd,
+                                price_usd=price,
                                 reasoning=f"Intent rejected: {intent_result.get('reason', '')}",
                                 score=35, trade_approved=False, tx_hash="",
                             )
@@ -790,6 +793,7 @@ def run():
                                     safe_post_checkpoint(
                                         action="SELL", pair="ETH/USD",
                                         amount_usd=trade_value_usd,
+                                        price_usd=price,
                                         reasoning=decision.get("reasoning", ""),
                                         score=val_score, trade_approved=True, tx_hash=tx_hash,
                                     )
@@ -807,6 +811,7 @@ def run():
                             safe_post_checkpoint(
                                 action="SELL", pair="ETH/USD",
                                 amount_usd=trade_value_usd,
+                                price_usd=price,
                                 reasoning=f"AI sell rejected: {intent_result.get('reason', '')}",
                                 score=35, trade_approved=False, tx_hash="",
                             )
