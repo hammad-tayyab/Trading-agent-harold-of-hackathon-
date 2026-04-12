@@ -5,9 +5,6 @@ Single source of truth for all shared hackathon contract addresses and ABIs.
 
 The organizers deployed these contracts on Sepolia. ALL teams use them.
 Do NOT change these addresses — the leaderboard reads from them.
-
-Person 5 imports this file. So does anyone else on the team who
-needs to talk to the blockchain.
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -25,7 +22,7 @@ ADDRESSES = {
 CHAIN_ID = 11155111  # Sepolia
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ABIs — exactly the functions we need from each contract
+# ABIs
 # ─────────────────────────────────────────────────────────────────────────────
 
 AGENT_REGISTRY_ABI = [
@@ -77,15 +74,14 @@ AGENT_REGISTRY_ABI = [
         "inputs":  [{"name": "agentId", "type": "uint256"}],
         "outputs": [{"name": "",        "type": "uint256"}],
     },
-    # Event so we can parse agentId from receipt
     {
         "name": "AgentRegistered",
         "type": "event",
         "inputs": [
-            {"name": "agentId",       "type": "uint256", "indexed": True},
-            {"name": "operatorWallet","type": "address", "indexed": True},
-            {"name": "agentWallet",   "type": "address", "indexed": False},
-            {"name": "name",          "type": "string",  "indexed": False},
+            {"name": "agentId",        "type": "uint256", "indexed": True},
+            {"name": "operatorWallet", "type": "address", "indexed": True},
+            {"name": "agentWallet",    "type": "address", "indexed": False},
+            {"name": "name",           "type": "string",  "indexed": False},
         ],
     },
 ]
@@ -181,9 +177,9 @@ RISK_ROUTER_ABI = [
         "name": "TradeApproved",
         "type": "event",
         "inputs": [
-            {"name": "agentId",        "type": "uint256", "indexed": True},
-            {"name": "intentHash",     "type": "bytes32", "indexed": False},
-            {"name": "amountUsdScaled","type": "uint256", "indexed": False},
+            {"name": "agentId",         "type": "uint256", "indexed": True},
+            {"name": "intentHash",      "type": "bytes32", "indexed": False},
+            {"name": "amountUsdScaled", "type": "uint256", "indexed": False},
         ],
     },
     {
@@ -225,11 +221,11 @@ REPUTATION_REGISTRY_ABI = [
         "type": "function",
         "stateMutability": "nonpayable",
         "inputs": [
-            {"name": "agentId",     "type": "uint256"},
-            {"name": "score",       "type": "uint8"},
-            {"name": "outcomeRef",  "type": "bytes32"},
-            {"name": "comment",     "type": "string"},
-            {"name": "feedbackType","type": "uint8"},
+            {"name": "agentId",      "type": "uint256"},
+            {"name": "score",        "type": "uint8"},
+            {"name": "outcomeRef",   "type": "bytes32"},
+            {"name": "comment",      "type": "string"},
+            {"name": "feedbackType", "type": "uint8"},
         ],
         "outputs": [],
     },
@@ -243,26 +239,23 @@ REPUTATION_REGISTRY_ABI = [
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EIP-712 DOMAINS  — must match what the contracts on-chain expect exactly
+# EIP-712 DOMAINS
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Used when signing TradeIntents for the RiskRouter
 RISK_ROUTER_DOMAIN = {
-    "name":             "RiskRouter",
-    "version":          "1",
-    "chainId":          CHAIN_ID,
+    "name":              "RiskRouter",
+    "version":           "1",
+    "chainId":           CHAIN_ID,
     "verifyingContract": ADDRESSES["RiskRouter"],
 }
 
-# Used when signing checkpoints against the AgentRegistry
 AGENT_REGISTRY_DOMAIN = {
-    "name":             "AITradingAgent",
-    "version":          "1",
-    "chainId":          CHAIN_ID,
+    "name":              "AITradingAgent",
+    "version":           "1",
+    "chainId":           CHAIN_ID,
     "verifyingContract": ADDRESSES["AgentRegistry"],
 }
 
-# TradeIntent struct field order — must be exact
 TRADE_INTENT_TYPES = {
     "TradeIntent": [
         {"name": "agentId",         "type": "uint256"},
@@ -277,11 +270,13 @@ TRADE_INTENT_TYPES = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RISK LIMITS — enforced by the RiskRouter on-chain, mirrored here
+# RISK LIMITS
+# FIX: MAX_TRADE_USD cap removed — was blocking all position exits above $500.
+# The RiskRouter on-chain enforces its own limits; we don't double-gate here.
 # ─────────────────────────────────────────────────────────────────────────────
 
-MAX_TRADE_USD          = 500      # $500 max per trade
+MAX_TRADE_USD          = 999_999   # effectively uncapped — chain enforces its own limit
 MAX_TRADES_PER_HOUR    = 10
-MAX_DRAWDOWN_PCT       = 5        # 5% portfolio drawdown limit
-DEFAULT_SLIPPAGE_BPS   = 100      # 1% slippage tolerance
-INTENT_DEADLINE_SECS   = 300      # 5 minutes before intent expires
+MAX_DRAWDOWN_PCT       = 5
+DEFAULT_SLIPPAGE_BPS   = 100
+INTENT_DEADLINE_SECS   = 300

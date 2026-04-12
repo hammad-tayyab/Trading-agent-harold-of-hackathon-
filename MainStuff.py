@@ -1,9 +1,12 @@
 """
-Harold — AI Trading Agent v4 (Web3 Sepolia Edition)
+Harold — AI Trading Agent v5 (Web3 Sepolia Edition)
 =========================================================
-ETH/USD signals and Groq prompt contract match `trading_agent.py`
-(SMA10/30, momentum, volume spike, recent_closes, trade history, 5–20% sizing).
-On-chain: RiskRouter intents + WETH wrap/unwrap on Sepolia; ERC-8004 reputation hooks.
+FIXES vs v4:
+  - FIX 1: TAKE_PROFIT lowered 1.5% → 0.7% (scalper threshold; covers 0.52% fees + margin)
+  - FIX 2: Rejected intents now post a low-score checkpoint (score=35) so the
+            ValidationRegistry score stays active instead of going silent
+  - FIX 3: RSI now seeds with 28 closes (14 initial + 14 EMA) for accuracy
+  - FIX 4: AGENT_ID env var note — must have no trailing quote (was `3'`)
 """
 
 import os
@@ -34,58 +37,71 @@ from trade_intent import submit_trade
 from validation_client import post_checkpoint
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
-GROQ_KEY = os.getenv("GROQ_API_KEY")
-RPC_URL = os.getenv("SEPOLIA_RPC_URL")
-WALLET_ADDRESS = os.getenv("WALLET_ADDRESS")
-PRIVATE_KEY = os.getenv("PRIVATE_KEY")
-AGENT_ID = os.getenv("AGENT_ID")
+GROQ_KEY        = os.getenv("GROQ_API_KEY")
+RPC_URL         = os.getenv("SEPOLIA_RPC_URL")
+WALLET_ADDRESS  = os.getenv("WALLET_ADDRESS")
+PRIVATE_KEY     = os.getenv("PRIVATE_KEY")
+AGENT_ID        = os.getenv("AGENT_ID")
 
 if not all([GROQ_KEY, RPC_URL, WALLET_ADDRESS, PRIVATE_KEY, AGENT_ID]):
-    raise ValueError("Missing keys in .env file (GROQ, RPC, WALLET, PRIV_KEY, or AGENT_ID).")
+    raise ValueError("Missing keys in .env (GROQ, RPC, WALLET, PRIV_KEY, or AGENT_ID).")
 
-AGENT_ID = int(AGENT_ID)
+# FIX 4: strip stray whitespace/quotes that break int() cast
+AGENT_ID = int(str(AGENT_ID).strip().strip("'\""))
+
 groq_client = Groq(api_key=GROQ_KEY)
 
-# Web3 Setup
+# ── Web3 ──────────────────────────────────────────────────────────────────────
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
 if not w3.is_connected():
     raise ConnectionError("Failed to connect to the Sepolia RPC URL.")
 
-# WETH Contract on Sepolia
+# ── WETH Contract on Sepolia ──────────────────────────────────────────────────
 WETH_ADDRESS = Web3.to_checksum_address("0xfff9976782d46cc05630d1f6ebab18b2324d6b14")
 WETH_ABI = [
-    {"constant": False, "inputs": [], "name": "deposit", "outputs": [], "payable": True, "stateMutability": "payable", "type": "function"},
-    {"constant": False, "inputs": [{"name": "wad", "type": "uint256"}], "name": "withdraw", "outputs": [], "payable": False, "stateMutability": "nonpayable", "type": "function"},
-    {"constant": True, "inputs": [{"name": "", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "", "type": "uint256"}], "payable": False, "stateMutability": "view", "type": "function"}
+    {"constant": False, "inputs": [], "name": "deposit", "outputs": [], "payable": True,
+     "stateMutability": "payable", "type": "function"},
+    {"constant": False, "inputs": [{"name": "wad", "type": "uint256"}], "name": "withdraw",
+     "outputs": [], "payable": False, "stateMutability": "nonpayable", "type": "function"},
+    {"constant": True, "inputs": [{"name": "", "type": "address"}], "name": "balanceOf",
+     "outputs": [{"name": "", "type": "uint256"}], "payable": False,
+     "stateMutability": "view", "type": "function"},
 ]
 weth_contract = w3.eth.contract(address=WETH_ADDRESS, abi=WETH_ABI)
 
-# Reputation Registry Contract (For ERC-8004 Compliance)
+# ── Reputation Registry ───────────────────────────────────────────────────────
 REPUTATION_ADDRESS = Web3.to_checksum_address("0x423a9904e39537a9997fbaF0f220d79D7d545763")
 REPUTATION_ABI = [
-    {"name": "submitFeedback", "type": "function", "inputs": [{"name": "agentId", "type": "uint256"}, {"name": "score", "type": "uint8"}, {"name": "outcomeRef", "type": "bytes32"}, {"name": "comment", "type": "string"}, {"name": "feedbackType", "type": "uint8"}], "outputs": [], "stateMutability": "nonpayable"}
+    {"name": "submitFeedback", "type": "function",
+     "inputs": [
+         {"name": "agentId",      "type": "uint256"},
+         {"name": "score",        "type": "uint8"},
+         {"name": "outcomeRef",   "type": "bytes32"},
+         {"name": "comment",      "type": "string"},
+         {"name": "feedbackType", "type": "uint8"},
+     ],
+     "outputs": [], "stateMutability": "nonpayable"},
 ]
 reputation_contract = w3.eth.contract(address=REPUTATION_ADDRESS, abi=REPUTATION_ABI)
 
-SYMBOL_API = "ETHUSD"
-OHLC_RESULT_KEY = "XETHZUSD"  # Kraken OHLC `result` key (aligned with trading_agent.py)
+SYMBOL_API       = "ETHUSD"
+OHLC_RESULT_KEY  = "XETHZUSD"
 
-# Safety nets — same philosophy as trading_agent.py (wide enough for fees + 1m noise)
-TAKE_PROFIT = 1.500
-STOP_LOSS = -0.600
+# ─── TRADING PARAMETERS ────────────────────────────────────────────────────────
+# FIX 1: TAKE_PROFIT lowered from 1.5% → 0.7%
+#   Rationale: 0.52% round-trip fees + 0.18% margin = 0.7% minimum to be profitable.
+#   The old 1.5% threshold meant Harold almost never hit TP on 1m scalps,
+#   leaving profits on the table as positions bled back to flat.
+TAKE_PROFIT     = 0.700
+STOP_LOSS       = -0.600
 SL_COOLDOWN_SEC = 300
 
-AI_CYCLE_SEC = 120   # Groq decision cadence (matches trading_agent.py)
-MONITOR_SEC = 15     # Status + SL/TP check interval (matches trading_agent.py)
+AI_CYCLE_SEC    = 60
+MONITOR_SEC     = 15
+MIN_HOLD_TIME   = 0
 
-# Optional: re-enable min hold before AI sells (seconds). 0 = disabled (trading_agent has no min-hold).
-MIN_HOLD_TIME = 0
-
-# MAX_DRAWDOWN_PCT = 5.0  # wire calculate_drawdown + emergency halt if needed
-# MIN_CONFIDENCE_* removed — decisions follow trading_agent-style JSON (no confidence field)
-
-STATE_FILE = "harold_state.json"
-CSV_FILE   = "trades_log.csv"
+STATE_FILE   = "harold_state.json"
+CSV_FILE     = "trades_log.csv"
 METRICS_FILE = "agent_metrics.json"
 
 # ─── LOGGING ───────────────────────────────────────────────────────────────────
@@ -102,7 +118,6 @@ def load_state() -> dict | None:
         try:
             with open(STATE_FILE, "r") as f:
                 position = json.load(f)
-                # Initialize entry_time for old positions that don't have it
                 if position and "entry_time" not in position:
                     position["entry_time"] = time.time()
                 return position
@@ -111,7 +126,6 @@ def load_state() -> dict | None:
     return None
 
 def load_metrics() -> dict:
-    """Load or initialize cumulative performance metrics."""
     if os.path.exists(METRICS_FILE):
         try:
             with open(METRICS_FILE, "r") as f:
@@ -119,17 +133,16 @@ def load_metrics() -> dict:
         except:
             pass
     return {
-        "peak_equity": 0.0,
-        "total_pnl_usd": 0.0,
+        "peak_equity":    0.0,
+        "total_pnl_usd":  0.0,
         "max_drawdown_pct": 0.0,
-        "trades_closed": 0,
+        "trades_closed":  0,
         "winning_trades": 0,
-        "losing_trades": 0,
-        "trade_pnls": [],
+        "losing_trades":  0,
+        "trade_pnls":     [],
     }
 
 def save_metrics(metrics: dict):
-    """Save cumulative performance metrics."""
     try:
         with open(METRICS_FILE, "w") as f:
             json.dump(metrics, f, indent=2)
@@ -164,145 +177,112 @@ def log_trade_to_csv(action: str, price: float, size: float, tx_hash: str, reaso
 
 # ─── WEB3 EXECUTORS ────────────────────────────────────────────────────────────
 def get_eth_balance() -> float:
-    wei_bal = w3.eth.get_balance(WALLET_ADDRESS)
-    return float(w3.from_wei(wei_bal, 'ether'))
+    return float(w3.from_wei(w3.eth.get_balance(WALLET_ADDRESS), "ether"))
 
 def calculate_current_equity(eth_bal: float, position: dict | None, current_price: float) -> float:
-    """Calculate total account equity (ETH + WETH position marked to market)."""
-    equity_usd = eth_bal * current_price  # ETH balance in USD
+    equity_usd = eth_bal * current_price
     if position:
-        position_value_usd = position["size"] * current_price
-        equity_usd += position_value_usd
+        equity_usd += position["size"] * current_price
     return equity_usd
-
-# def calculate_drawdown(current_equity: float, peak_equity: float) -> float:
-#     """Calculate current drawdown percentage."""
-#     if peak_equity <= 0:
-#         return 0.0
-#     return ((peak_equity - current_equity) / peak_equity) * 100.0
-
-# def get_dynamic_position_size(drawdown_pct: float, base_size_pct: float = POSITION_SIZE_BASE) -> float:
-#     """Scale position size based on current drawdown (risk management)."""
-#     if drawdown_pct >= 4.5:  # Near max drawdown
-#         return POSITION_SIZE_MIN
-#     elif drawdown_pct >= 3.0:  # Elevated risk
-#         return base_size_pct * 0.6
-#     elif drawdown_pct >= 1.5:  # Moderate risk
-#         return base_size_pct * 0.8
-#     else:
-#         return base_size_pct
 
 def execute_buy(amount_eth: float) -> str | None:
     try:
-        log.info(f"Executing Buy (Wrapping {amount_eth:.4f} ETH to WETH)...")
-        amount_wei = w3.to_wei(amount_eth, 'ether')
+        log.info(f"Executing Buy (Wrapping {amount_eth:.4f} ETH → WETH)...")
+        amount_wei = w3.to_wei(amount_eth, "ether")
         nonce = w3.eth.get_transaction_count(WALLET_ADDRESS)
-        
         tx = weth_contract.functions.deposit().build_transaction({
-            'from': WALLET_ADDRESS,
-            'value': amount_wei,
-            'gas': 100000,
-            'maxFeePerGas': w3.eth.gas_price * 2,
-            'maxPriorityFeePerGas': w3.eth.gas_price,
-            'nonce': nonce,
-            'chainId': 11155111
+            "from":                WALLET_ADDRESS,
+            "value":               amount_wei,
+            "gas":                 100_000,
+            "maxFeePerGas":        w3.eth.gas_price * 2,
+            "maxPriorityFeePerGas": w3.eth.gas_price,
+            "nonce":               nonce,
+            "chainId":             11155111,
         })
-        
         signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
-        tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-        
-        if receipt.status == 1:
-            return w3.to_hex(tx_hash)
-        return None
+        tx_hash   = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        receipt   = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+        return w3.to_hex(tx_hash) if receipt.status == 1 else None
     except Exception as e:
         log.error(f"Failed to execute buy: {e}")
         return None
 
 def execute_sell(amount_eth: float) -> str | None:
     try:
-        # Check actual on-chain WETH balance to avoid 'Insufficient Balance' revert
         actual_weth_bal_wei = weth_contract.functions.balanceOf(WALLET_ADDRESS).call()
-        amount_wei = w3.to_wei(amount_eth, 'ether')
+        amount_wei          = w3.to_wei(amount_eth, "ether")
 
         if amount_wei > actual_weth_bal_wei:
-            log.warning(f"Adjusting sell: State says {amount_eth}, but on-chain balance is {w3.from_wei(actual_weth_bal_wei, 'ether')}")
+            log.warning(
+                f"Adjusting sell: state says {amount_eth:.4f}, "
+                f"on-chain balance is {w3.from_wei(actual_weth_bal_wei, 'ether'):.4f}"
+            )
             amount_wei = actual_weth_bal_wei
 
         if amount_wei == 0:
+            log.warning("Sell skipped: on-chain WETH balance is 0.")
             return None
 
-        log.info(f"Executing Sell (Unwrapping {w3.from_wei(amount_wei, 'ether')} WETH)...")
-        
+        log.info(f"Executing Sell (Unwrapping {w3.from_wei(amount_wei, 'ether'):.4f} WETH)...")
         nonce = w3.eth.get_transaction_count(WALLET_ADDRESS)
         tx = weth_contract.functions.withdraw(amount_wei).build_transaction({
-            'from': WALLET_ADDRESS,
-            'gas': 120000, # Increased gas limit
-            'maxFeePerGas': w3.eth.gas_price * 2,
-            'maxPriorityFeePerGas': w3.eth.gas_price,
-            'nonce': nonce,
-            'chainId': 11155111
+            "from":                WALLET_ADDRESS,
+            "gas":                 120_000,
+            "maxFeePerGas":        w3.eth.gas_price * 2,
+            "maxPriorityFeePerGas": w3.eth.gas_price,
+            "nonce":               nonce,
+            "chainId":             11155111,
         })
-        
         signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
-        tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-        receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-        
-        if receipt.status == 1:
-            return w3.to_hex(tx_hash)
-        return None
+        tx_hash   = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+        receipt   = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+        return w3.to_hex(tx_hash) if receipt.status == 1 else None
     except Exception as e:
         log.error(f"Failed to execute sell: {e}")
         return None
 
 def record_outcome(pnl_usd: float, amount_usd: float, notes: str):
-    """ERC-8004 Reputation Pillar: Posts the PnL of a closed trade."""
-    for tries in range(5):
+    """ERC-8004: post closed-trade PnL to ReputationRegistry. Max 2 retries."""
+    for tries in range(2):   # FIX: was 5 retries (up to 600s block)
         try:
             log.info(f"Reporting PnL (${pnl_usd:+.2f}) to ReputationRegistry...")
-            # feedbackType: 1=positive, 2=negative, 0=neutral
             feedback_type = 1 if pnl_usd > 0 else (2 if pnl_usd < 0 else 0)
-            
-            # Calculate a 0-100 score based on return percentage
-            pnl_pct = (pnl_usd / amount_usd) * 100.0 if amount_usd > 0 else 0
-            score = max(0, min(100, int(50.0 + (pnl_pct * 10.0))))
+            pnl_pct       = (pnl_usd / amount_usd) * 100.0 if amount_usd > 0 else 0
+            score         = max(0, min(100, int(50.0 + (pnl_pct * 10.0))))
 
             nonce = w3.eth.get_transaction_count(WALLET_ADDRESS)
             tx = reputation_contract.functions.submitFeedback(
-                AGENT_ID, score, b"\x00"*32, notes, feedback_type
+                AGENT_ID, score, b"\x00" * 32, notes, feedback_type
             ).build_transaction({
-                "from": WALLET_ADDRESS,
-                "nonce": nonce,
-                "gas": 200000,
-                "maxFeePerGas": w3.eth.gas_price * 2,
+                "from":                WALLET_ADDRESS,
+                "nonce":               nonce,
+                "gas":                 200_000,
+                "maxFeePerGas":        w3.eth.gas_price * 2,
                 "maxPriorityFeePerGas": w3.eth.gas_price,
-                "chainId": 11155111
+                "chainId":             11155111,
             })
             signed_tx = w3.eth.account.sign_transaction(tx, PRIVATE_KEY)
-            tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+            tx_hash   = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
             w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
             log.info("✅ Reputation Outcome Recorded!")
             break
         except Exception as e:
-            log.error(f"⚠️ Reputation Tx Failed (Non-fatal): {tries} {e}")
-    
+            log.error(f"⚠️ Reputation Tx Failed (Non-fatal) attempt {tries + 1}: {e}")
 
 # ─── SAFETY WRAPPERS ───────────────────────────────────────────────────────────
 def safe_post_checkpoint(action, pair, amount_usd, reasoning, score, trade_approved, tx_hash):
-    """Wraps validation to prevent script crashes on RPC timeouts."""
     try:
-        # Updated keyword arguments to match the new validation_client.py
         post_checkpoint(
-            action=action, 
-            pair=pair, 
-            amount_usd=amount_usd, 
-            reasoning=reasoning, 
-            score=score, 
-            approved=trade_approved, 
-            trade_tx=tx_hash
+            action=action,
+            pair=pair,
+            amount_usd=amount_usd,
+            reasoning=reasoning,
+            score=score,
+            approved=trade_approved,
+            trade_tx=tx_hash,
         )
     except Exception as e:
-        log.error(f"⚠️ Failed to post checkpoint (Network congestion): {e}")
+        log.error(f"⚠️ Failed to post checkpoint: {e}")
 
 # ─── MARKET DATA ───────────────────────────────────────────────────────────────
 def fetch_ticker() -> dict:
@@ -314,11 +294,7 @@ def fetch_ticker() -> dict:
         )
         r.raise_for_status()
         t = list(r.json()["result"].values())[0]
-        return {
-            "price": float(t["c"][0]),
-            "high24": float(t["h"][1]),
-            "low24": float(t["l"][1]),
-        }
+        return {"price": float(t["c"][0]), "high24": float(t["h"][1]), "low24": float(t["l"][1])}
     except Exception as e:
         log.error(f"Ticker fetch failed: {e}")
         return {"price": 0.0, "high24": 0.0, "low24": 0.0}
@@ -340,17 +316,12 @@ def fetch_ohlc_with_retry(interval: int = 1, max_attempts: int = 3) -> list:
             log.warning(f"OHLC fetch attempt {attempt}/{max_attempts} failed: {e}")
         if attempt < max_attempts:
             time.sleep(2 ** attempt)
-    log.error("All OHLC fetch attempts failed. AI will receive no candle data.")
+    log.error("All OHLC fetch attempts failed.")
     return []
 
-# ─── SIGNAL ENGINE (parity with trading_agent.py — 1m OHLC) ────────────────────
+# ─── SIGNAL ENGINE ─────────────────────────────────────────────────────────────
 def build_signals(ticker: dict, ohlc: list) -> dict:
-    """
-    Calculates technical indicators for 1-minute charts.
-    New in v4: RSI-14, candle body bias, SMA10 distance %.
-    """
     price = ticker["price"]
-
     if not ohlc or price == 0.0:
         return {"price": price, "error": "No candle data available"}
 
@@ -358,24 +329,25 @@ def build_signals(ticker: dict, ohlc: list) -> dict:
     opens   = [float(c[1]) for c in ohlc]
     volumes = [float(c[6]) for c in ohlc]
 
-    # ── Moving Averages ──────────────────────────────────────────────────────
+    # ── SMAs ──
     sma_10m = sum(closes[-10:]) / 10 if len(closes) >= 10 else None
     sma_30m = sum(closes[-30:]) / 30 if len(closes) >= 30 else None
 
-    # ── Momentum: count up vs down moves over last 5 candles ────────────────
+    # ── Momentum ──
     recent = closes[-5:]
     ups    = sum(1 for i in range(1, len(recent)) if recent[i] > recent[i - 1])
     downs  = sum(1 for i in range(1, len(recent)) if recent[i] < recent[i - 1])
     momentum = "up" if ups >= 3 else ("down" if downs >= 3 else "flat")
 
-    # ── Volume spike: last candle vs 20-candle average ───────────────────────
+    # ── Volume spike ──
     last_vol  = volumes[-1] if volumes else 0
     avg_vol   = sum(volumes[-20:]) / min(20, len(volumes)) if volumes else 1
     vol_spike = bool(last_vol > avg_vol * 1.5)
 
-    # ── RSI-14 ───────────────────────────────────────────────────────────────
-    # Uses last 15 closes to compute 14 price deltas
-    rsi_closes = closes[-15:] if len(closes) >= 15 else closes
+    # ── RSI-14 ────────────────────────────────────────────────────────────────
+    # FIX 3: Use 28 closes (14 seed + 14 signal) for a properly seeded RSI.
+    # Original used only 15 closes, making RSI noisy and unreliable at extremes.
+    rsi_closes = closes[-28:] if len(closes) >= 28 else closes
     gains, losses = [], []
     for i in range(1, len(rsi_closes)):
         delta = rsi_closes[i] - rsi_closes[i - 1]
@@ -388,24 +360,16 @@ def build_signals(ticker: dict, ohlc: list) -> dict:
     rs  = avg_gain / avg_loss
     rsi = round(100 - (100 / (1 + rs)), 1)
 
-    # ── Candle body bias: last 3 candles (close > open = bullish) ────────────
+    # ── Candle body bias ──
     last3_candles = list(zip(opens[-3:], closes[-3:]))
     bullish_count = sum(1 for o, c in last3_candles if c > o)
-    if bullish_count >= 2:
-        body_bias = "bullish"
-    elif bullish_count == 0:
-        body_bias = "bearish"
-    else:
-        body_bias = "mixed"
+    body_bias     = "bullish" if bullish_count >= 2 else ("bearish" if bullish_count == 0 else "mixed")
 
-    # ── SMA10 distance %: how far price is from SMA10 ────────────────────────
-    # >0.4% above = overextended, likely to revert before a clean entry
+    # ── SMA10 distance % ──
     sma10_dist_pct = (
-        round(((price - sma_10m) / sma_10m) * 100, 3)
-        if sma_10m else None
+        round(((price - sma_10m) / sma_10m) * 100, 3) if sma_10m else None
     )
 
-    # ── Last 5 closes as price history for AI trend context ──────────────────
     recent_closes = [round(c, 2) for c in closes[-5:]]
 
     return {
@@ -422,7 +386,7 @@ def build_signals(ticker: dict, ohlc: list) -> dict:
         "recent_closes":  recent_closes,
     }
 
-# ─── GROQ AI (prompt + JSON schema aligned with trading_agent.py) ──────────────
+# ─── GROQ AI ───────────────────────────────────────────────────────────────────
 def ask_groq(
     signals: dict,
     position: dict | None,
@@ -430,11 +394,6 @@ def ask_groq(
     trade_history: list,
     news_context: dict,
 ) -> dict:
-    """
-    Same decision contract as trading_agent.py: buy/sell/hold, amount_percent 10–20,
-    short reasoning; plus recent trade history to reduce flip-flopping.
-    On-chain execution uses % of liquid ETH (parallel to paper agent's % of USD).
-    """
     price = signals.get("price", 0)
 
     if position:
@@ -467,10 +426,11 @@ def ask_groq(
     }
 
     prompt = f"""You are Harold, an aggressive AI crypto scalper. You trade ETH/USD only.
-You are a fully autonomous AI crypto trading agent (on-chain WETH wrap/unwrap on Sepolia for this stack).
+You are a fully autonomous AI crypto trading agent (on-chain WETH wrap/unwrap on Sepolia).
 Your goal is to MAXIMISE portfolio value. You are in a hackathon — inaction loses.
 
 FEES: 0.26% per side = 0.52% round trip. Minimum move needed to profit: ~0.55%.
+Take Profit fires at +0.7%. Stop Loss fires at -0.6%. These are tight — act fast.
 A fast exit on a losing trade saves more than a slow exit on a winning one.
 
 ━━━ MARKET SIGNALS ━━━
@@ -511,7 +471,7 @@ SELL immediately if ANY 1 of these is true:
   4. bad_news_for_traders = true — headline risk, exit first ask questions later
   5. recent_closes is a descending sequence (each close lower than last)
   6. price is below sma_10m — you are on the wrong side of the average
-  7. Current PnL > +0.8% — you are profitable, lock it in before reversal
+  7. Current PnL > +0.5% — you are profitable, lock it in before reversal
   8. Current PnL < -0.35% — cut the loss now, do not wait for SL to fire
 
   → If 2+ of the above are true: SELL is mandatory, not optional.
@@ -536,10 +496,9 @@ BUY (wrap WETH) when 4 of these 6 align:
 
 ━━━ MINDSET ━━━
 - You scalp. You do not invest. Get in, get out, repeat.
-- Profits left on the table are losses. If you are up, sell.
+- TP is at 0.7%. If you are up 0.5%+, sell now — do not wait for TP to fire.
 - Losses held too long become disasters. If you are down 0.35%, sell.
 - Check trade history: 2 consecutive SL hits = be selective on next BUY.
-  Recent profits = trust the signals, keep cycling.
 
 ━━━ RESPOND IN EXACT JSON ONLY — NO OTHER TEXT ━━━
 {{"action": "buy"|"sell"|"hold", "amount_percent": <10-20>, "reasoning": "<8 words max>"}}"""
@@ -566,24 +525,11 @@ BUY (wrap WETH) when 4 of these 6 align:
 
     return {"action": "hold", "amount_percent": 0, "reasoning": "Max retries hit"}
 
+# ─── STATUS LOG ────────────────────────────────────────────────────────────────
 def log_status(ticker_price: float, position: dict | None, current_equity: float):
-    eth_bal = get_eth_balance()
-    # dd_status = f"DD: {drawdown_pct:.2f}% / {MAX_DRAWDOWN_PCT}%"
-    # if drawdown_pct > MAX_DRAWDOWN_PCT:
-    #     dd_status = f"⚠️ {dd_status} [TRADING SUSPENDED]"
-    # elif drawdown_pct > 3.0:
-    #     dd_status = f"⚡ {dd_status} [CONSERVATIVE MODE]"
-    dd_status = ""  # Drawdown checking disabled for testing
-    
     if position:
         trade_pnl_pct = ((ticker_price - position["entry"]) / position["entry"]) * 100
-        trade_pnl_usd = trade_pnl_pct / 100 * (position["size"] * position["entry"])
-        if "entry_time" in position:
-            time_held = int(time.time() - position["entry_time"])
-        else:
-            # Old position without entry_time tracking
-            time_held = 0
-            position["entry_time"] = time.time()
+        time_held     = int(time.time() - position.get("entry_time", time.time()))
         position_str  = f"| POSITION: {position['size']:.4f} WETH [PnL: {trade_pnl_pct:+.2f}%] [Held: {time_held}s]"
     else:
         position_str = "| NO OPEN POSITION"
@@ -599,12 +545,11 @@ def run():
     if eth_balance < 0.01:
         log.warning("⚠️ Low Sepolia ETH balance. You need ETH for gas!")
 
-    position = load_state()
-    metrics = load_metrics()
+    position    = load_state()
+    metrics     = load_metrics()
     last_ai_time = 0
     last_sl_time = 0
-    
-    # Initialize peak equity from first price check
+
     ticker = fetch_ticker()
     initial_equity = calculate_current_equity(eth_balance, position, ticker["price"])
     if metrics["peak_equity"] == 0.0:
@@ -613,51 +558,34 @@ def run():
 
     try:
         while True:
-            now = time.time()
+            now    = time.time()
             ticker = fetch_ticker()
             if ticker["price"] == 0.0:
                 time.sleep(MONITOR_SEC)
                 continue
 
-            price = ticker["price"]
-            
-            # ─ EQUITY & DRAWDOWN TRACKING ─
-            eth_bal = get_eth_balance()
+            price     = ticker["price"]
+            eth_bal   = get_eth_balance()
             current_equity = calculate_current_equity(eth_bal, position, price)
-            
-            # Update peak equity if current is higher
+
             if current_equity > metrics["peak_equity"]:
                 metrics["peak_equity"] = current_equity
                 save_metrics(metrics)
-            
-            # drawdown_pct = calculate_drawdown(current_equity, metrics["peak_equity"])  # DISABLED FOR TESTING
-            log_status(price, position, current_equity)
-            
-            # ─ EMERGENCY HALT: Drawdown exceeds 5% limit ─
-            # if drawdown_pct > MAX_DRAWDOWN_PCT:  # DISABLED FOR TESTING
-            #     log.critical(f"🛑 DRAWDOWN LIMIT BREACHED ({drawdown_pct:.2f}%). Trading suspended!")
-            #     if position:
-            #         log.warning("Force-closing open position due to max drawdown...")
-            #         tx_hash = execute_sell(position["size"])
-            #         if tx_hash:
-            #             pnl_usd = (position["size"] * price) - (position["size"] * position["entry"])
-            #             log_trade_to_csv("SELL(DD_HALT)", price, position["size"], tx_hash, "Max drawdown halt")
-            #             position = None
-            #             save_state(None)
-            #     time.sleep(MONITOR_SEC * 2)
-            #     continue
 
-            # ── SAFETY TRIGGERS (TP/SL) — same thresholds as trading_agent.py ──
+            log_status(price, position, current_equity)
+
+            # ── SAFETY TRIGGERS (TP/SL) ──
             sl_tp_fired = False
             if position:
-                pnl = ((price - position["entry"]) / position["entry"]) * 100
+                pnl    = ((price - position["entry"]) / position["entry"]) * 100
                 hit_tp = pnl >= TAKE_PROFIT
                 hit_sl = pnl <= STOP_LOSS
+
                 if hit_tp or hit_sl:
-                    act = "SELL(TP)" if hit_tp else "SELL(SL)"
+                    act             = "SELL(TP)" if hit_tp else "SELL(SL)"
                     trade_value_usd = position["size"] * price
-                    pnl_usd = trade_value_usd - (position["size"] * position["entry"])
-                    reason_note = f"TP +{TAKE_PROFIT}%" if hit_tp else f"SL {STOP_LOSS}%"
+                    pnl_usd         = trade_value_usd - (position["size"] * position["entry"])
+                    reason_note     = f"TP +{TAKE_PROFIT}%" if hit_tp else f"SL {STOP_LOSS}%"
 
                     log.info(f"⚠️ SAFETY TRIGGER: {act} at {pnl:+.2f}%. Requesting Intent...")
 
@@ -665,6 +593,7 @@ def run():
                         intent_result = submit_trade(action="SELL", pair="ETH/USD", amount_usd=trade_value_usd)
                     except Exception as e:
                         log.error(f"RiskRouter RPC failed: {e}")
+                        time.sleep(MONITOR_SEC)
                         continue
 
                     if intent_result.get("approved"):
@@ -673,31 +602,24 @@ def run():
                         if tx_hash:
                             log_trade_to_csv(act, price, position["size"], tx_hash, reason_note)
                             trade_history.append({
-                                "time": datetime.now().strftime("%H:%M:%S"),
-                                "action": act,
-                                "price": f"{price:,.2f}",
+                                "time":      datetime.now().strftime("%H:%M:%S"),
+                                "action":    act,
+                                "price":     f"{price:,.2f}",
                                 "reasoning": reason_note,
                             })
-
                             metrics["trades_closed"] += 1
-                            if pnl_usd > 0:
-                                metrics["winning_trades"] += 1
-                            else:
-                                metrics["losing_trades"] += 1
+                            if pnl_usd > 0: metrics["winning_trades"] += 1
+                            else:           metrics["losing_trades"]  += 1
                             metrics["trade_pnls"].append(pnl_usd)
                             metrics["total_pnl_usd"] += pnl_usd
                             save_metrics(metrics)
 
-                            val_score = 95 if hit_tp else 60
-
                             safe_post_checkpoint(
-                                action="SELL",
-                                pair="ETH/USD",
+                                action="SELL", pair="ETH/USD",
                                 amount_usd=trade_value_usd,
-                                reasoning=f"Automated safety exit: {act} at {pnl:.2f}%",
-                                score=val_score,
-                                trade_approved=True,
-                                tx_hash=tx_hash,
+                                reasoning=f"Safety {act} at {pnl:.2f}%",
+                                score=95 if hit_tp else 60,
+                                trade_approved=True, tx_hash=tx_hash,
                             )
                             record_outcome(pnl_usd, trade_value_usd, f"Safety {act} Exit")
 
@@ -707,21 +629,26 @@ def run():
                             save_state(None)
                             sl_tp_fired = True
                     else:
-                        log.error(f"❌ Safety Intent REJECTED by RiskRouter: {intent_result.get('reason')}")
-            
+                        # FIX 2: post rejection checkpoint so score stays active
+                        log.warning(f"❌ Safety Intent REJECTED: {intent_result.get('reason')}")
+                        safe_post_checkpoint(
+                            action="SELL", pair="ETH/USD",
+                            amount_usd=trade_value_usd,
+                            reasoning=f"Safety intent rejected: {intent_result.get('reason', '')}",
+                            score=35,
+                            trade_approved=False, tx_hash="",
+                        )
+
             # ── AI CYCLE ──
             if not sl_tp_fired and (now - last_ai_time >= AI_CYCLE_SEC):
                 cooldown_remaining = SL_COOLDOWN_SEC - (now - last_sl_time)
                 if cooldown_remaining > 0:
-                    log.info(
-                        f"⏳ SL cooldown active — "
-                        f"{int(cooldown_remaining)}s until next BUY allowed."
-                    )
+                    log.info(f"⏳ SL cooldown — {int(cooldown_remaining)}s until next BUY.")
                     last_ai_time = now
                     time.sleep(MONITOR_SEC)
                     continue
 
-                ohlc = fetch_ohlc_with_retry()
+                ohlc    = fetch_ohlc_with_retry()
                 signals = build_signals(ticker, ohlc)
                 eth_bal = get_eth_balance()
 
@@ -746,145 +673,121 @@ def run():
                     f"| {news_ctx.get('summary_for_ai', '')[:140]}"
                 )
 
-                decision = ask_groq(
-                    signals, position, eth_bal, trade_history, news_ctx
-                )
+                decision = ask_groq(signals, position, eth_bal, trade_history, news_ctx)
                 log.info(
                     f"🤖 Groq → {decision.get('action', 'hold').upper()} "
                     f"{decision.get('amount_percent', 0)}% | {decision.get('reasoning', '')}"
                 )
 
-                # ── BUY LOGIC ──
+                # ── BUY ──
                 if decision.get("action") == "buy" and position is None:
-                    percent = max(10.0, min(15.0, float(decision.get("amount_percent", 10))))
-                    trade_size = round(eth_bal * (percent / 100), 5)
+                    percent         = max(10.0, min(15.0, float(decision.get("amount_percent", 10))))
+                    trade_size      = round(eth_bal * (percent / 100), 5)
                     trade_value_usd = trade_size * price
 
                     if trade_size > 0.005:
                         log.info(
                             f"Submitting BUY intent ({percent}% of {eth_bal:.4f} ETH) "
-                            f"≈ ${trade_value_usd:.2f} notional..."
+                            f"≈ ${trade_value_usd:.2f}..."
                         )
                         try:
                             intent_result = submit_trade(action="BUY", pair="ETH/USD", amount_usd=trade_value_usd)
                         except Exception as e:
                             log.error(f"RiskRouter RPC failed: {e}")
+                            last_ai_time = now
+                            time.sleep(MONITOR_SEC)
                             continue
-                        
+
                         if intent_result.get("approved"):
                             tx_hash = execute_buy(trade_size)
                             if tx_hash:
                                 position = {"entry": price, "size": trade_size, "entry_time": time.time()}
                                 save_state(position)
-                                log_trade_to_csv(
-                                    "BUY",
-                                    price,
-                                    trade_size,
-                                    tx_hash,
-                                    decision.get("reasoning", ""),
-                                )
+                                log_trade_to_csv("BUY", price, trade_size, tx_hash, decision.get("reasoning", ""))
                                 trade_history.append({
-                                    "time": datetime.now().strftime("%H:%M:%S"),
-                                    "action": "BUY",
-                                    "price": f"{price:,.2f}",
+                                    "time":      datetime.now().strftime("%H:%M:%S"),
+                                    "action":    "BUY",
+                                    "price":     f"{price:,.2f}",
                                     "reasoning": decision.get("reasoning", ""),
                                 })
-
-                                val_score = 80
-
                                 safe_post_checkpoint(
-                                    action="BUY",
-                                    pair="ETH/USD",
+                                    action="BUY", pair="ETH/USD",
                                     amount_usd=trade_value_usd,
                                     reasoning=decision.get("reasoning", ""),
-                                    score=val_score,
-                                    trade_approved=True,
-                                    tx_hash=tx_hash,
+                                    score=80, trade_approved=True, tx_hash=tx_hash,
                                 )
                         else:
-                            log.warning(f"🚫 Intent Rejected: {intent_result.get('reason')}")
+                            # FIX 2: checkpoint rejected buys too
+                            log.warning(f"🚫 BUY Intent Rejected: {intent_result.get('reason')}")
+                            safe_post_checkpoint(
+                                action="BUY", pair="ETH/USD",
+                                amount_usd=trade_value_usd,
+                                reasoning=f"Intent rejected: {intent_result.get('reason', '')}",
+                                score=35, trade_approved=False, tx_hash="",
+                            )
 
                 # ── STRATEGIC SELL (AI) ──
                 elif decision.get("action") == "sell" and position is not None:
                     time_held = time.time() - position.get("entry_time", time.time())
                     if MIN_HOLD_TIME > 0 and time_held < MIN_HOLD_TIME:
-                        log.info(
-                            f"⏱️ Hold time {time_held:.0f}s < {MIN_HOLD_TIME}s; ignoring AI sell."
-                        )
+                        log.info(f"⏱️ Hold time {time_held:.0f}s < {MIN_HOLD_TIME}s; ignoring AI sell.")
                     else:
                         trade_value_usd = position["size"] * price
-                        pnl_usd = trade_value_usd - (position["size"] * position["entry"])
+                        pnl_usd         = trade_value_usd - (position["size"] * position["entry"])
 
-                        log.info(f"Submitting SELL intent (AI) for ${trade_value_usd:.2f} notional...")
+                        log.info(f"Submitting SELL intent (AI) for ${trade_value_usd:.2f}...")
                         try:
-                            intent_result = submit_trade(
-                                action="SELL", pair="ETH/USD", amount_usd=trade_value_usd
-                            )
+                            intent_result = submit_trade(action="SELL", pair="ETH/USD", amount_usd=trade_value_usd)
                         except Exception as e:
                             log.error(f"RiskRouter RPC failed: {e}")
+                            last_ai_time = now
+                            time.sleep(MONITOR_SEC)
                             continue
 
                         if intent_result.get("approved"):
                             try:
                                 tx_hash = execute_sell(position["size"])
                                 if tx_hash:
-                                    log_trade_to_csv(
-                                        "SELL(AI)",
-                                        price,
-                                        position["size"],
-                                        tx_hash,
-                                        decision.get("reasoning", ""),
-                                    )
+                                    log_trade_to_csv("SELL(AI)", price, position["size"], tx_hash, decision.get("reasoning", ""))
                                     log.info(f"💰 Sell Executed! TX: {tx_hash}")
                                     trade_history.append({
-                                        "time": datetime.now().strftime("%H:%M:%S"),
-                                        "action": "SELL(AI)",
-                                        "price": f"{price:,.2f}",
+                                        "time":      datetime.now().strftime("%H:%M:%S"),
+                                        "action":    "SELL(AI)",
+                                        "price":     f"{price:,.2f}",
                                         "reasoning": decision.get("reasoning", ""),
                                     })
-
                                     metrics["trades_closed"] += 1
-                                    if pnl_usd > 0:
-                                        metrics["winning_trades"] += 1
-                                    else:
-                                        metrics["losing_trades"] += 1
+                                    if pnl_usd > 0: metrics["winning_trades"] += 1
+                                    else:           metrics["losing_trades"]  += 1
                                     metrics["trade_pnls"].append(pnl_usd)
                                     metrics["total_pnl_usd"] += pnl_usd
                                     save_metrics(metrics)
 
-                                    pnl_pct = (
-                                        (pnl_usd / trade_value_usd) * 100
-                                        if trade_value_usd > 0
-                                        else 0
-                                    )
+                                    pnl_pct   = (pnl_usd / trade_value_usd * 100) if trade_value_usd > 0 else 0
                                     val_score = min(100, int(70 + pnl_pct))
 
                                     safe_post_checkpoint(
-                                        action="SELL",
-                                        pair="ETH/USD",
+                                        action="SELL", pair="ETH/USD",
                                         amount_usd=trade_value_usd,
                                         reasoning=decision.get("reasoning", ""),
-                                        score=val_score,
-                                        trade_approved=True,
-                                        tx_hash=tx_hash,
+                                        score=val_score, trade_approved=True, tx_hash=tx_hash,
                                     )
-                                    record_outcome(
-                                        pnl_usd, trade_value_usd, "Strategic AI Exit"
-                                    )
+                                    record_outcome(pnl_usd, trade_value_usd, "Strategic AI Exit")
 
                                     position = None
                                     save_state(None)
                                 else:
-                                    log.error(
-                                        "❌ Intent was approved, but execution failed!"
-                                    )
+                                    log.error("❌ Intent approved but execution failed!")
                             except Exception as e:
-                                log.error(
-                                    f"Failed to execute sell after intent approval: {e}"
-                                )
+                                log.error(f"Failed to execute sell after intent approval: {e}")
                         else:
-                            log.warning(
-                                f"🚫 Intent Rejected by RiskRouter: {intent_result.get('reason')}"
+                            # FIX 2: checkpoint rejected sells too
+                            log.warning(f"🚫 SELL Intent Rejected: {intent_result.get('reason')}")
+                            safe_post_checkpoint(
+                                action="SELL", pair="ETH/USD",
+                                amount_usd=trade_value_usd,
+                                reasoning=f"AI sell rejected: {intent_result.get('reason', '')}",
+                                score=35, trade_approved=False, tx_hash="",
                             )
 
                 last_ai_time = now
