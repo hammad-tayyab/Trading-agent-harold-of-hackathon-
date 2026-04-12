@@ -1,12 +1,11 @@
 """
 validation_client.py
 ====================
-Posts EIP-712 attestations to the ValidationRegistry on Sepolia.
+This file handles the hackathon's "Proof of Work" logging. 
 
-FIXES vs original:
-  - FIX 1: retries reduced from 3 → 2 (max block time: 2 × 120s = 240s vs 600s)
-  - FIX 2: module-level post_checkpoint() now also callable for REJECTED intents
-            so the ValidationRegistry score doesn't go dark between real trades
+Every time the AI makes a decision, it sends a brief report (a "checkpoint") to the 
+ValidationRegistry smart contract. This tells the hackathon judges exactly why the AI 
+decided to trade and ensures all activity is transparent and securely recorded on the blockchain.
 """
 
 import hashlib, json, os, time, logging
@@ -18,6 +17,10 @@ log = logging.getLogger("validation")
 
 
 class ValidationClient:
+    """
+    A helper tool that connects to the blockchain and packages our AI's "reasoning" 
+    into a formatted message, then formally submits it to the Validation smart contract.
+    """
     def __init__(self):
         rpc           = os.getenv("SEPOLIA_RPC_URL", "https://ethereum-sepolia-rpc.publicnode.com")
         self.w3       = Web3(Web3.HTTPProvider(rpc))
@@ -38,8 +41,13 @@ class ValidationClient:
         score: int = 75,
         approved: bool = False,
         trade_tx: str = "",
-        retries: int = 2,          # FIX 1: was 3 (up to 600s block); now 2 (max 240s)
+        retries: int = 2,          # Number of times to retry if network is busy
     ) -> str:
+        """
+        Takes the details of a trade (like action, amount, and the AI's 'reasoning') 
+        and permanently logs it to the Sepolia blockchain. It also saves a local 
+        copy in a file (`checkpoints.jsonl`) for easy viewing.
+        """
         ts             = int(time.time())
         amount_scaled  = int(amount_usd * 100)
         r_hash         = hashlib.sha3_256(reasoning.encode()).hexdigest()

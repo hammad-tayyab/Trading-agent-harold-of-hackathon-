@@ -1,15 +1,11 @@
 """
 trade_intent.py
 ===============
-EIP-712 signed trade intent submission to the RiskRouter on Sepolia.
+This file handles sending trade requests to the smart contracts on Sepolia.
 
-FIXES vs original:
-  - FIX 1: `sealf` typo in __init__ corrected to `self`
-  - FIX 2: simulateIntent() view call added BEFORE submitTradeIntent()
-            — saves gas on intents the chain would reject anyway
-  - FIX 3: MAX_TRADE_USD local cap removed (was blocking all exits > $500)
-  - FIX 4: Rate limit check now posts a rejection checkpoint so the
-            ValidationRegistry score doesn't go silent during busy periods
+Instead of directly swapping tokens, the AI creates an "Intent" (a signed message 
+saying "I want to buy $500 of ETH"). The RiskRouter smart contract checks 
+if this trade is safe and within hackathon rules before approving it. 
 """
 
 import os, time, json, logging, hashlib
@@ -25,7 +21,11 @@ log = logging.getLogger("trade_intent")
 
 
 class TradeIntentClient:
-    def __init__(self):                          # FIX 1: was `sealf`
+    """
+    A helper class that connects to the blockchain, holds our secure wallet keys, 
+    and packages our AI's trade ideas into proper blockchain messages.
+    """
+    def __init__(self):
         rpc = os.getenv("SEPOLIA_RPC_URL", "https://ethereum-sepolia-rpc.publicnode.com")
         self.w3       = Web3(Web3.HTTPProvider(rpc))
         self.op_key   = os.getenv("OPERATOR_PRIVATE_KEY") or os.getenv("PRIVATE_KEY")
@@ -39,8 +39,13 @@ class TradeIntentClient:
         )
         self.history  = []   # timestamps of recent submitted intents
 
-    # ── INTERNAL: build & sign an intent struct ───────────────────────────────
+    # ── INTERNAL: package & sign a trade idea ───────────────────────────────
     def _build_intent(self, action: str, pair: str, amount_usd: float) -> tuple[dict, bytes]:
+        """
+        Takes a simple trade idea (like "BUY ETHUSD for $100") and bundles it 
+        into a strict format the smart contract expects. It then "signs" it 
+        so the contract knows nobody tampered with the message.
+        """
         nonce  = self.router.functions.getIntentNonce(self.agent_id).call()
         intent = {
             "agentId":         self.agent_id,
@@ -69,9 +74,13 @@ class TradeIntentClient:
         sig = Account.sign_message(encoded, self.ag_key).signature
         return intent, sig
 
-    # ── INTERNAL: convert intent dict → tuple for contract calls ─────────────
+    # ── INTERNAL: convert dictionary to list ─────────────────────────────────
     @staticmethod
     def _intent_tuple(intent: dict) -> tuple:
+        """
+        Smart contracts prefer simple lists (tuples) rather than Python dictionaries.
+        This function simply converts the data into the format the blockchain needs.
+        """
         return (
             intent["agentId"],
             intent["agentWallet"],
@@ -83,8 +92,13 @@ class TradeIntentClient:
             intent["deadline"],
         )
 
-    # ── PUBLIC: submit a trade intent ─────────────────────────────────────────
+    # ── PUBLIC: ask permission to trade ───────────────────────────────────────
     def submit_trade(self, action: str, pair: str, amount_usd: float, retries: int = 3) -> dict:
+        """
+        Called by Harold when he wants to make a trade. This function packages the 
+        request, optionally asks the network "would this succeed?" (simulation), 
+        and if it looks good, formally submits it to the blockchain.
+        """
         # 1. Normalise inputs
         action = action.upper()
         pair   = "XBTUSD" if "BTC" in pair.upper() else "ETHUSD"

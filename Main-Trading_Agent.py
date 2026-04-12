@@ -1,12 +1,14 @@
 """
-Harold — AI Trading Agent v5 (Web3 Sepolia Edition)
-=========================================================
-FIXES vs v4:
-  - FIX 1: TAKE_PROFIT lowered 1.5% → 0.7% (scalper threshold; covers 0.52% fees + margin)
-  - FIX 2: Rejected intents now post a low-score checkpoint (score=35) so the
-            ValidationRegistry score stays active instead of going silent
-  - FIX 3: RSI now seeds with 28 closes (14 initial + 14 EMA) for accuracy
-  - FIX 4: AGENT_ID env var note — must have no trailing quote (was `3'`)
+Main-Trading_Agent.py
+=====================
+This is the core "Harold" AI Agent that actually plays the hackathon on the Sepolia blockchain.
+
+What it does:
+1. Wakes up and checks if it has ETH.
+2. Every 2 minutes, it gathers signals (chart patterns, news) and asks the Groq AI what to do.
+3. If Groq says "BUY", the agent signs a trade request, sends it to the RiskRouter, and wraps ETH into WETH.
+4. If it hits its profit goal or stop-loss, it automatically sells to protect the account.
+5. It publishes all its decisions to the Reputation smart contracts so judges can see its score.
 """
 
 import os
@@ -88,15 +90,15 @@ SYMBOL_API       = "ETHUSD"
 OHLC_RESULT_KEY  = "XETHZUSD"
 
 # ─── TRADING PARAMETERS ────────────────────────────────────────────────────────
-# FIX 1: TAKE_PROFIT lowered from 1.5% → 0.7%
-#   Rationale: 0.52% round-trip fees + 0.18% margin = 0.7% minimum to be profitable.
-#   The old 1.5% threshold meant Harold almost never hit TP on 1m scalps,
-#   leaving profits on the table as positions bled back to flat.
-TAKE_PROFIT     = 0.700
-STOP_LOSS       = -0.600
-SL_COOLDOWN_SEC = 300
+# 
+# These are the profit/loss rules. Fees are 0.52% round trip, so we must make 
+# more than 0.52% to actually see a profit.
+# ───────────────────────────────────────────────────────────────────────────────
+TAKE_PROFIT     = 0.700    # If price goes up 0.7%, forcefully lock in the profit.
+STOP_LOSS       = -0.600   # If price goes down 0.6%, cut the loss immediately.
+SL_COOLDOWN_SEC = 300      # If we take a loss, wait 5 minutes before trading again.
 
-AI_CYCLE_SEC    = 60
+AI_CYCLE_SEC    = 180      # How often we wake up the AI to ask its opinion (3 min).
 MONITOR_SEC     = 15
 MIN_HOLD_TIME   = 0
 
@@ -186,6 +188,10 @@ def calculate_current_equity(eth_bal: float, position: dict | None, current_pric
     return equity_usd
 
 def execute_buy(amount_eth: float) -> str | None:
+    """
+    Called when the AI decides to Buy. On the blockchain, this means converting 
+    our normal ETH into 'Wrapped ETH' (WETH) via a smart contract.
+    """
     try:
         log.info(f"Executing Buy (Wrapping {amount_eth:.4f} ETH → WETH)...")
         amount_wei = w3.to_wei(amount_eth, "ether")
@@ -321,6 +327,10 @@ def fetch_ohlc_with_retry(interval: int = 1, max_attempts: int = 3) -> list:
 
 # ─── SIGNAL ENGINE ─────────────────────────────────────────────────────────────
 def build_signals(ticker: dict, ohlc: list) -> dict:
+    """
+    Reads the raw chart data from Kraken and calculates all the technical 
+    patterns (like Moving Averages, RSI, Momentum) so the AI can understand it.
+    """
     price = ticker["price"]
     if not ohlc or price == 0.0:
         return {"price": price, "error": "No candle data available"}
@@ -394,6 +404,11 @@ def ask_groq(
     trade_history: list,
     news_context: dict,
 ) -> dict:
+    """
+    This is Harold's brain. It packages all the numbers (price, chart signals, 
+    news, account balance) into a strict set of rules and asks the Groq LLM to 
+    make a 'buy', 'sell', or 'hold' decision.
+    """
     price = signals.get("price", 0)
 
     if position:
@@ -537,6 +552,12 @@ def log_status(ticker_price: float, position: dict | None, current_equity: float
 
 # ─── MAIN LOOP ─────────────────────────────────────────────────────────────────
 def run():
+    """
+    The heartbeat of the agent. This runs forever in a loop.
+    1. Checks the price every few seconds.
+    2. Enforces emergency stops if needed.
+    3. Every few minutes, asks the AI if we should trade.
+    """
     log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     log.info("   HAROLD V5 — ON-CHAIN (signals + prompt = trading_agent)  ")
     log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

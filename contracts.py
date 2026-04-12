@@ -1,10 +1,12 @@
 """
 contracts.py
 ============
-Single source of truth for all shared hackathon contract addresses and ABIs.
+This file acts as the "address book" and "translation manual" for the smart contracts.
 
-The organizers deployed these contracts on Sepolia. ALL teams use them.
-Do NOT change these addresses — the leaderboard reads from them.
+The hackathon organizers deployed these contracts on the Sepolia test blockchain. 
+ALL teams use these exact same addresses so the main leaderboard can track everyone fairly.
+
+Do NOT change these addresses — the hackathon infrastructure relies on them!
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -22,7 +24,11 @@ ADDRESSES = {
 CHAIN_ID = 11155111  # Sepolia
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ABIs
+# ABIs (Application Binary Interfaces)
+# 
+# Think of an ABI as a "translation manual" for a smart contract. Since the 
+# contracts live on the blockchain and speak a different language, the ABI tells 
+# our Python code exactly what functions exist and what data they require.
 # ─────────────────────────────────────────────────────────────────────────────
 
 AGENT_REGISTRY_ABI = [
@@ -240,6 +246,10 @@ REPUTATION_REGISTRY_ABI = [
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EIP-712 DOMAINS
+# 
+# EIP-712 is a standard for signing digital messages. This setup acts like a 
+# "wax seal" on an envelope. It proves that a trade request genuinely came from 
+# Harold, and ensures hackers can't reuse the signature for a different contract.
 # ─────────────────────────────────────────────────────────────────────────────
 
 RISK_ROUTER_DOMAIN = {
@@ -271,12 +281,13 @@ TRADE_INTENT_TYPES = {
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RISK LIMITS
-# FIX: MAX_TRADE_USD cap removed — was blocking all position exits above $500.
-# The RiskRouter on-chain enforces its own limits; we don't double-gate here.
+# 
+# Simple guardrails to stop the AI from overtrading or taking bad risks.
+# The blockchain contract (RiskRouter) has its own strict limits too.
 # ─────────────────────────────────────────────────────────────────────────────
 
-MAX_TRADE_USD          = 999_999   # effectively uncapped — chain enforces its own limit
-MAX_TRADES_PER_HOUR    = 10
-MAX_DRAWDOWN_PCT       = 5
-DEFAULT_SLIPPAGE_BPS   = 100
-INTENT_DEADLINE_SECS   = 300
+MAX_TRADE_USD          = 999_999   # No local cap; we let the blockchain enforce the max size.
+MAX_TRADES_PER_HOUR    = 10        # Prevent the AI from spamming trades (max 10 an hour).
+MAX_DRAWDOWN_PCT       = 5         # (Disabled mostly) Stop trading if we lose 5% of peak money.
+DEFAULT_SLIPPAGE_BPS   = 100       # Allow a 1% wiggle room on price (100 basis points).
+INTENT_DEADLINE_SECS   = 300       # A trade intent expires in 5 minutes (300 seconds).

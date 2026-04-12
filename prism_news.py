@@ -1,8 +1,10 @@
 """
-PRISM API (api.prismapi.ai) — trading-community news risk for Harold.
-
-Set PRISM_API_KEY in .env (optional for some endpoints; crypto news often needs a key).
-Optional: PRISM_API_BASE (default https://api.prismapi.ai).
+prism_news.py
+=============
+This file acts as Harold's "eyes and ears" for the news. 
+It connects to the PRISM API (a news service) to read the latest crypto headlines. 
+It specifically searches for scary words (like "hack" or "bankruptcy") to warn the AI 
+if it's a dangerous time to trade.
 """
 
 from __future__ import annotations
@@ -21,7 +23,11 @@ def _prism_base() -> str:
 def _prism_key() -> str:
     return (os.getenv("PRISM_API_KEY") or "").strip()
 
-# Headline / body tokens that usually worry crypto traders (substring match, lowercased)
+# ─────────────────────────────────────────────────────────────────────────────
+# RED FLAG DICTIONARIES
+# These are words the AI actively scans for in news headlines. If it sees 
+# these words, it knows the market might crash, and it will be extra cautious.
+# ─────────────────────────────────────────────────────────────────────────────
 NEGATIVE_KEYWORDS = frozenset(
     {
         "hack",
@@ -149,13 +155,14 @@ def fetch_trading_community_news_context(
     log: logging.Logger | None = None,
 ) -> dict[str, Any]:
     """
-    Single object for the LLM: did something broadly *bad for traders* show up
-    in PRISM crypto headlines and/or ETH social sentiment?
-
-    Returns keys including:
-      bad_news_for_traders (bool)
-      headline_risk: low | moderate | elevated | high | unknown
-      summary_for_ai (one short paragraph)
+    The main News Engine.
+    
+    1. It fetches social sentiment (how Twitter/Reddit feels about Ethereum).
+    2. It fetches the top 20 latest crypto news articles.
+    3. It scans everything for our red flag words.
+    
+    Finally, it hands back a simple summary to Harold, basically saying: 
+    "It's safe to trade," or "WARNING: Bad news for traders!"
     """
     out: dict[str, Any] = {
         "source": "prism",
