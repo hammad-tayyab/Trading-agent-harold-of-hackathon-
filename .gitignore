@@ -27,5 +27,6 @@ htmlcov/
 .DS_Store
 Thumbs.db
 #files
-.json
-.jsonl
+agent_metrics.json
+checkpoints.jsonl
+harold_state.json
